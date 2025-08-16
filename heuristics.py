@@ -1,6 +1,5 @@
 from PIL import Image
 import numpy as np
-import cv2
 
 def _resize_for_analysis(img: Image.Image, max_side=512) -> Image.Image:
     w, h = img.size
@@ -30,15 +29,39 @@ def estimate_yellow_brown_fraction(img: Image.Image) -> float:
     mask = yellow_mask | brown_mask
     return round(float(mask.mean()), 3)
 
+def _sobel_gradients_numpy(gray: np.ndarray):
+    # gray: uint8 2D
+    gray = gray.astype(np.float32) / 255.0
+    # Sobel kernels
+    Kx = np.array([[1,0,-1],[2,0,-2],[1,0,-1]], dtype=np.float32)
+    Ky = np.array([[1,2,1],[0,0,0],[-1,-2,-1]], dtype=np.float32)
+    # 2D convolution via padding + sliding windows (vectorized)
+    H, W = gray.shape
+    pad = 1
+    gpad = np.pad(gray, ((pad,pad),(pad,pad)), mode='edge')
+    # build 3x3 windows
+    # Extract shifted views
+    def shift(a, dy, dx):
+        return gpad[pad+dy:pad+dy+H, pad+dx:pad+dx+W]
+    # Apply kernels
+    gx = (shift(gray, -1,-1)*Kx[0,0] + shift(gray, -1,0)*Kx[0,1] + shift(gray, -1,1)*Kx[0,2] +
+          shift(gray,  0,-1)*Kx[1,0] + shift(gray,  0,0)*Kx[1,1] + shift(gray,  0,1)*Kx[1,2] +
+          shift(gray,  1,-1)*Kx[2,0] + shift(gray,  1,0)*Kx[2,1] + shift(gray,  1,1)*Kx[2,2])
+    gy = (shift(gray, -1,-1)*Ky[0,0] + shift(gray, -1,0)*Ky[0,1] + shift(gray, -1,1)*Ky[0,2] +
+          shift(gray,  0,-1)*Ky[1,0] + shift(gray,  0,0)*Ky[1,1] + shift(gray,  0,1)*Ky[1,2] +
+          shift(gray,  1,-1)*Ky[2,0] + shift(gray,  1,0)*Ky[2,1] + shift(gray,  1,1)*Ky[2,2])
+    return gx, gy
+
 def estimate_edge_density(img: Image.Image) -> float:
-    """Edge density via Sobel gradients (OpenCV)."""
+    """Edge density via Sobel gradients implemented with NumPy only."""
     img = _resize_for_analysis(img)
     gray = np.asarray(img.convert("L"), dtype=np.uint8)
-    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-    mag = cv2.magnitude(gx, gy)
-    # normalize 0..1 to pick a simple threshold
+    gx, gy = _sobel_gradients_numpy(gray)
+    mag = np.sqrt(gx*gx + gy*gy)
+    # normalize for a stable threshold
     mmin, mmax = float(mag.min()), float(mag.max())
+    if mmax - mmin < 1e-6:
+        return 0.0
     mag_norm = (mag - mmin) / (mmax - mmin + 1e-6)
     edges = (mag_norm > 0.25).astype(np.float32)
     return round(float(edges.mean()), 3)
